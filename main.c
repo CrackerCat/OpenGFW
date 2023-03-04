@@ -20,6 +20,7 @@ static unsigned int nf_dispatch(void *priv, struct sk_buff *skb, const struct nf
     struct tcphdr *tcph;
     size_t tcp_payload_len;
     void *buf_tmp = NULL;
+    unsigned int action = NF_ACCEPT;
 
     if (!skb)
         return NF_ACCEPT;
@@ -51,8 +52,6 @@ static unsigned int nf_dispatch(void *priv, struct sk_buff *skb, const struct nf
         buf_tmp = (void *)tcph + tcph->doff * 4;
     }
 
-    unsigned int action = NF_ACCEPT;
-
     switch (og_http_handler(buf_tmp, tcp_payload_len))
     {
     case OG_TCP_DROP:
@@ -76,30 +75,25 @@ static unsigned int nf_dispatch(void *priv, struct sk_buff *skb, const struct nf
 static int __init nf_opengfw_init(void)
 {
     nf_dispatch_ops = (struct nf_hook_ops *)kcalloc(1, sizeof(struct nf_hook_ops), GFP_KERNEL);
-    if (nf_dispatch_ops != NULL)
-    {
-        nf_dispatch_ops->hook = (nf_hookfn *)nf_dispatch;
-        nf_dispatch_ops->hooknum = NF_INET_POST_ROUTING;
-        nf_dispatch_ops->pf = NFPROTO_IPV4;
-        nf_dispatch_ops->priority = NF_IP_PRI_FILTER;
-
-        if (nf_register_net_hook(&init_net, nf_dispatch_ops))
-        {
-            printk(KERN_INFO LOG_PREFIX "failed to register hook\n");
-            kfree(nf_dispatch_ops);
-            return -1;
-        }
-        else
-        {
-            printk(KERN_INFO LOG_PREFIX "loaded\n");
-            return 0;
-        }
-    }
-    else
+    if (nf_dispatch_ops == NULL)
     {
         printk(KERN_INFO LOG_PREFIX "failed to allocate memory for nf_dispatch_ops\n");
         return -1;
     }
+    nf_dispatch_ops->hook = (nf_hookfn *)nf_dispatch;
+    nf_dispatch_ops->hooknum = NF_INET_POST_ROUTING;
+    nf_dispatch_ops->pf = NFPROTO_IPV4;
+    nf_dispatch_ops->priority = NF_IP_PRI_FILTER;
+
+    if (nf_register_net_hook(&init_net, nf_dispatch_ops))
+    {
+        printk(KERN_INFO LOG_PREFIX "failed to register hook\n");
+        kfree(nf_dispatch_ops);
+        return -1;
+    }
+
+    printk(KERN_INFO LOG_PREFIX "loaded\n");
+    return 0;
 }
 
 static void __exit nf_opengfw_exit(void)
@@ -109,10 +103,13 @@ static void __exit nf_opengfw_exit(void)
         nf_unregister_net_hook(&init_net, nf_dispatch_ops);
         kfree(nf_dispatch_ops);
     }
+
     printk(KERN_INFO LOG_PREFIX "unloaded\n");
 }
 
 module_init(nf_opengfw_init);
 module_exit(nf_opengfw_exit);
 
-MODULE_LICENSE("MIT");
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("tobyxdd");
+MODULE_DESCRIPTION("OpenGFW");
