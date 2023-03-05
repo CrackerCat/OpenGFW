@@ -109,7 +109,7 @@ static struct kernel_param_ops hostlist_param_ops = {
     .get = hostlist_param_get,
 };
 
-module_param_cb(hostlist, &hostlist_param_ops, &hostlist_str, 0600);
+module_param_cb(http_hosts, &hostlist_param_ops, &hostlist_str, 0600);
 
 static bool wildcard_match(const char *haystack, size_t haystack_len, const char *pattern)
 {
@@ -163,16 +163,73 @@ static int og_http_extract_host(void *packet, size_t packet_len, char **host, si
     return 0;
 }
 
+static int og_https_extract_host(void *rp, size_t packet_len, char **host, size_t *host_len)
+{
+    unsigned char *packet = rp;
+    size_t len;
+    size_t ch_len;
+    size_t pos;
+    size_t ext_len;
+    size_t ext_type;
+    size_t ext_size;
+
+    if (packet[0] != 0x16 || packet[1] != 0x03 || packet[5] != 0x01)
+        return 1; // Not a TLS Client Hello
+
+    len = (packet[3] << 8) | packet[4];
+    ch_len = (packet[6] << 16) | (packet[7] << 8) | packet[8];
+
+    if (ch_len > len || len > packet_len)
+        return 1; // Length sanity check
+
+    pos = 43;                                          // session_id length
+    pos += 1 + packet[pos];                            // Skip session_id
+    pos += 2 + ((packet[pos] << 8) | packet[pos + 1]); // Skip cipher_suites
+    pos += 1 + packet[pos];                            // Skip compression_methods
+
+    if (pos + 2 > ch_len)
+        return 1; // Length sanity check
+
+    ext_len = (packet[pos] << 8) | packet[pos + 1];
+    pos += 2;
+
+    while (pos < ch_len)
+    {
+        if (pos + 4 > ch_len)
+            return 1; // Length sanity check
+
+        ext_type = (packet[pos] << 8) | packet[pos + 1];
+        ext_size = (packet[pos + 2] << 8) | packet[pos + 3];
+        pos += 4;
+
+        if (ext_type == 0x0000)
+        {
+            // Server Name Indication
+            // We skip list length & type for now, assume it's a host_name
+            pos += 3;
+            *host_len = (packet[pos] << 8) | packet[pos + 1];
+            *host = &packet[pos + 2];
+            return 0;
+        }
+
+        pos += ext_size;
+    }
+
+    return 1; // No host extension found
+}
+
+// og_http_handler handles both HTTP and HTTPS
 int og_http_handler(void *buf, size_t buf_len)
 {
     char *host;
     size_t host_len;
 
     if (buf_len < 16)
-        return OG_TCP_ACCEPT; // Too short to be a HTTP request
+        return OG_TCP_ACCEPT; // Too short
 
-    if (og_http_extract_host(buf, buf_len, &host, &host_len))
-        return OG_TCP_ACCEPT;
+    if (og_https_extract_host(buf, buf_len, &host, &host_len) &&
+        og_http_extract_host(buf, buf_len, &host, &host_len))
+        return OG_TCP_ACCEPT; // No host found
 
     if (hostlist_head)
     {
@@ -180,7 +237,10 @@ int og_http_handler(void *buf, size_t buf_len)
         while (entry)
         {
             if (wildcard_match(host, host_len, entry->host))
+            {
+                printk(KERN_INFO LOG_PREFIX "blocking host %.*s", (int)host_len, host);
                 return OG_TCP_DROP;
+            }
             entry = entry->next;
         }
     }
