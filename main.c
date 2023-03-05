@@ -4,6 +4,7 @@
 #include <linux/netfilter.h>
 #include <linux/netfilter_ipv4.h>
 #include <linux/ip.h>
+#include <linux/ipv6.h>
 #include <linux/tcp.h>
 #include <linux/udp.h>
 #include <linux/string.h>
@@ -12,11 +13,14 @@
 
 #include "utils.h"
 
-static struct nf_hook_ops *nf_dispatch_ops = NULL;
+static struct nf_hook_ops *nf_dispatch_v4_ops = NULL;
+static struct nf_hook_ops *nf_dispatch_v6_ops = NULL;
 
+// nf_dispatch handles both IPv4 and IPv6
 static unsigned int nf_dispatch(void *priv, struct sk_buff *skb, const struct nf_hook_state *state)
 {
-    struct iphdr *iph;
+    struct iphdr *ip4h;
+    struct ipv6hdr *ip6h;
     struct tcphdr *tcph;
     size_t tcp_payload_len;
     void *buf_tmp = NULL;
@@ -25,9 +29,26 @@ static unsigned int nf_dispatch(void *priv, struct sk_buff *skb, const struct nf
     if (!skb)
         return NF_ACCEPT;
 
-    iph = ip_hdr(skb);
-    if (iph->protocol != IPPROTO_TCP)
-        return NF_ACCEPT;
+    ip4h = ip_hdr(skb);
+    // Check IP version
+    if (ip4h->version == 4)
+    {
+        // IPv4
+        if (ip4h->protocol != IPPROTO_TCP)
+            return NF_ACCEPT; // Not TCP
+    }
+    else if (ip4h->version == 6)
+    {
+        // IPv6
+        ip6h = ipv6_hdr(skb);
+        if (ip6h->nexthdr != IPPROTO_TCP)
+            return NF_ACCEPT; // Not TCP
+    }
+    else
+    {
+        return NF_ACCEPT; // Not IPv4 or IPv6
+    }
+
     tcph = tcp_hdr(skb);
 
     tcp_payload_len = skb->len - skb_transport_offset(skb) - tcph->doff * 4;
@@ -74,21 +95,39 @@ static unsigned int nf_dispatch(void *priv, struct sk_buff *skb, const struct nf
 
 static int __init nf_opengfw_init(void)
 {
-    nf_dispatch_ops = (struct nf_hook_ops *)kcalloc(1, sizeof(struct nf_hook_ops), GFP_KERNEL);
-    if (nf_dispatch_ops == NULL)
+    nf_dispatch_v4_ops = (struct nf_hook_ops *)kcalloc(1, sizeof(struct nf_hook_ops), GFP_KERNEL);
+    if (nf_dispatch_v4_ops == NULL)
     {
-        printk(KERN_INFO LOG_PREFIX "failed to allocate memory for nf_dispatch_ops\n");
+        printk(KERN_INFO LOG_PREFIX "failed to allocate memory for nf_dispatch_v4_ops\n");
         return -1;
     }
-    nf_dispatch_ops->hook = (nf_hookfn *)nf_dispatch;
-    nf_dispatch_ops->hooknum = NF_INET_POST_ROUTING;
-    nf_dispatch_ops->pf = NFPROTO_IPV4;
-    nf_dispatch_ops->priority = NF_IP_PRI_FILTER;
+    nf_dispatch_v4_ops->hook = (nf_hookfn *)nf_dispatch;
+    nf_dispatch_v4_ops->hooknum = NF_INET_POST_ROUTING;
+    nf_dispatch_v4_ops->pf = NFPROTO_IPV4;
+    nf_dispatch_v4_ops->priority = NF_IP_PRI_FILTER;
 
-    if (nf_register_net_hook(&init_net, nf_dispatch_ops))
+    if (nf_register_net_hook(&init_net, nf_dispatch_v4_ops))
     {
-        printk(KERN_INFO LOG_PREFIX "failed to register hook\n");
-        kfree(nf_dispatch_ops);
+        printk(KERN_INFO LOG_PREFIX "failed to register ipv4 hook\n");
+        kfree(nf_dispatch_v4_ops);
+        return -1;
+    }
+
+    nf_dispatch_v6_ops = (struct nf_hook_ops *)kcalloc(1, sizeof(struct nf_hook_ops), GFP_KERNEL);
+    if (nf_dispatch_v6_ops == NULL)
+    {
+        printk(KERN_INFO LOG_PREFIX "failed to allocate memory for nf_dispatch_v6_ops\n");
+        return -1;
+    }
+    nf_dispatch_v6_ops->hook = (nf_hookfn *)nf_dispatch;
+    nf_dispatch_v6_ops->hooknum = NF_INET_POST_ROUTING;
+    nf_dispatch_v6_ops->pf = NFPROTO_IPV6;
+    nf_dispatch_v6_ops->priority = NF_IP_PRI_FILTER;
+
+    if (nf_register_net_hook(&init_net, nf_dispatch_v6_ops))
+    {
+        printk(KERN_INFO LOG_PREFIX "failed to register ipv6 hook\n");
+        kfree(nf_dispatch_v6_ops);
         return -1;
     }
 
@@ -98,10 +137,15 @@ static int __init nf_opengfw_init(void)
 
 static void __exit nf_opengfw_exit(void)
 {
-    if (nf_dispatch_ops != NULL)
+    if (nf_dispatch_v4_ops != NULL)
     {
-        nf_unregister_net_hook(&init_net, nf_dispatch_ops);
-        kfree(nf_dispatch_ops);
+        nf_unregister_net_hook(&init_net, nf_dispatch_v4_ops);
+        kfree(nf_dispatch_v4_ops);
+    }
+    if (nf_dispatch_v6_ops != NULL)
+    {
+        nf_unregister_net_hook(&init_net, nf_dispatch_v6_ops);
+        kfree(nf_dispatch_v6_ops);
     }
 
     printk(KERN_INFO LOG_PREFIX "unloaded\n");
